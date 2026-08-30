@@ -1,23 +1,28 @@
 """
-analyze_cca.py — CCA(ST stream, CT stream) 解耦程度分析
+analyze_cca.py — disentanglement analysis of the ST and CT streams via CCA
 
-对每个 checkpoint, hook 住 DisentangleFormerBlock 的 st_encoder / ct_encoder /
-(可选) cma 模块, 在整个 test set 上跑前向, 收集成对的 token 级特征:
+For each checkpoint, hook the st_encoder / ct_encoder / (optional) cma modules of
+the DisentangleFormerBlock, run a forward pass over the whole test set, and collect
+paired token-level features:
 
-  stage "pre"  : ST/CT encoder 各自输出的 r_s, r_c  (Eq.3/Eq.4 之后, 融合之前;
-                 对 baseline(disentangle, 无 CMA) 模型这就是最终送入拼接的 r_s/r_c)
-  stage "post" : 仅 ours_cma 模型有 —— CMAFusion 融合之后的 r_s, r_c
+  stage "pre"  : r_s, r_c output by the ST/CT encoders respectively (after Eq.3/Eq.4,
+                 before fusion; for the baseline (disentangle, no CMA) model these are
+                 the final r_s/r_c that go into the concatenation)
+  stage "post" : ours_cma model only — r_s, r_c after the CMAFusion
 
-r_s / r_c 在同一次前向、同一批 token 位置上逐 token 配对, 用 CCA 衡量两路的
-典型相关系数(0~1, 越大越纠缠, 越小越解耦)。
+r_s / r_c are paired token-for-token at the same token positions within one forward
+pass and one batch, and CCA is used to measure the canonical correlation between the
+two streams (0~1; larger = more entangled, smaller = more disentangled).
 
-对比:
-  1) baseline "pre"(=final) vs ours_cma "post"   — 跨模型(不同训练权重)
-  2) ours_cma "pre" vs ours_cma "post"           — 同一次前向内, 只隔一个 CMA
-     算子, 直接衡量 CMA 这一步操作对相关性的因果影响, 控制了训练权重差异
+Comparisons:
+  1) baseline "pre" (=final) vs ours_cma "post" — across models (different trained weights)
+  2) ours_cma "pre" vs ours_cma "post"          — within a single forward pass, separated
+     only by the CMA operator, directly measuring the causal effect of the CMA step on
+     correlation while controlling for the trained-weight difference
 
-若 post 的相关性系统性高于 pre / 高于 baseline, 说明 CMA 把设计上应独立的
-两路重新耦合了, 与"解耦"原则相悖, 可以解释为什么 CMA 对 mIoU 的提升有限。
+If the "post" correlation is systematically higher than "pre" / higher than baseline,
+this indicates CMA re-couples two streams that are by design meant to be independent,
+contradicting the disentanglement principle and explaining why CMA's mIoU gain is limited.
 """
 import argparse
 import glob
@@ -186,7 +191,7 @@ def main():
     paths = [p for p in paths if re.match(
         r"seg_(indian_pines|pavia)_(disentangle|ours_cma)_s\d+_best\.pth$", os.path.basename(p))]
 
-    print(f"找到 {len(paths)} 个 checkpoint (disentangle baseline + ours_cma, 主实验 seed 组)\n")
+    print(f"Found {len(paths)} checkpoints (disentangle baseline + ours_cma, main-experiment seed set)\n")
 
     # agg[dataset][model][(layer,stage)] -> list of (mean_corr, max_corr)
     agg = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -207,7 +212,7 @@ def main():
 
     # ──────────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("=== 汇总: mean canonical corr (mean±std over seeds) ===")
+    print("=== Summary: mean canonical corr (mean±std over seeds) ===")
     print("=" * 70)
     for dataset in sorted(agg.keys()):
         print(f"\n[{dataset}]")
@@ -224,7 +229,7 @@ def main():
 
     # ──────────────────────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("=== 对比 1: baseline(pre=final) vs ours_cma(post) — 跨模型 ===")
+    print("=== Comparison 1: baseline(pre=final) vs ours_cma(post) — across models ===")
     print("=" * 70)
     for dataset in sorted(agg.keys()):
         base = agg[dataset].get("disentangle", {})
@@ -243,10 +248,10 @@ def main():
             delta = cm - bm
             print(f"  layer {li}: baseline={bm:.4f} (null={bn:.4f})  "
                   f"ours_cma(post)={cm:.4f} (null={cn:.4f})  "
-                  f"delta={delta:+.4f}{'  <-- CMA 提高了相关性 (更纠缠)' if delta > 0.02 else ''}")
+                  f"delta={delta:+.4f}{'  <-- CMA increased correlation (more entangled)' if delta > 0.02 else ''}")
 
     print("\n" + "=" * 70)
-    print("=== 对比 2: ours_cma 模型内部, pre(融合前) vs post(融合后) — 同一次前向, 隔离 CMA 算子本身的因果效应 ===")
+    print("=== Comparison 2: within the ours_cma model, pre(before fusion) vs post(after fusion) — same forward pass, isolating the causal effect of the CMA operator itself ===")
     print("=" * 70)
     for dataset in sorted(agg.keys()):
         cma = agg[dataset].get("ours_cma", {})
@@ -265,11 +270,12 @@ def main():
             print(f"  layer {li}: pre={pm:.4f} (null={pn:.4f})  post={qm:.4f} (null={qn:.4f})  "
                   f"delta={delta:+.4f}")
             if delta > (qn - pn) + 0.02:
-                print("    <-- post-pre 提升超过零假设(shuffled)重拟合噪声地板, "
-                      "CMA 算子本身确实把两流重新耦合了")
+                print("    <-- post-pre increase exceeds the null-hypothesis (shuffled) refit noise"
+                      " floor; the CMA operator itself does re-couple the two streams")
             else:
-                print("    <-- post-pre 提升与零假设重拟合噪声同量级, 提升可被拟合偏差解释, "
-                      "不足以证明 CMA 破坏解耦")
+                print("    <-- post-pre increase is on the same scale as the null-hypothesis refit"
+                      " noise; the increase can be explained by fitting bias and is insufficient to"
+                      " prove that CMA breaks disentanglement")
 
 
 if __name__ == "__main__":

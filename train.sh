@@ -12,8 +12,8 @@ conda activate hsi
 
 cd ~/hsi_project
 
-# ── Baseline (原版DisentangleFormer) ──
+# ── Baseline (original DisentangleFormer) ──
 python train.py --dataset indian_pines --epochs 100
 
-# ── Ours (加CMA跨流注意力) ──
+# ── Ours (with CMA cross-stream attention) ──
 python train.py --dataset indian_pines --epochs 100 --use_cma

@@ -1,11 +1,13 @@
 """
-analyze_gamma.py — 汇总 Gated CMA 模块的 gamma_s / gamma_c 门控值
+analyze_gamma.py — aggregates the gamma_s / gamma_c gating values of the Gated CMA module
 
-加载 /mnt/scratch/znzs0468/results/ 下所有 seg_*_ours_cma_s*_best.pth
-(即 CMA 分割模型的主实验 checkpoint, 不含 r10/r20/r30 train_ratio 消融),
-打印每个 checkpoint 里每一层 CMAFusion 的 gamma_s / gamma_c 标量值,
-并按数据集汇总 mean/std, 用于判断 CMA 是否被网络自己"关掉"了
-(gamma 越接近 0, 说明该分支的 cross-attention 更新对残差流的贡献越小).
+Loads every seg_*_ours_cma_s*_best.pth under /mnt/scratch/znzs0468/results/
+(i.e. the main-experiment CMA segmentation checkpoints, excluding the
+r10/r20/r30 train_ratio ablation runs), prints the gamma_s / gamma_c scalar of
+every CMAFusion layer in each checkpoint, and aggregates mean/std per dataset
+to determine whether the network has effectively "turned off" CMA itself
+(the closer gamma is to 0, the smaller that branch's cross-attention update
+contributes to the residual stream).
 """
 import argparse
 import glob
@@ -50,10 +52,10 @@ def main():
     paths = sorted(p for p in glob.glob(pattern) if "_r10_" not in p and "_r20_" not in p and "_r30_" not in p)
 
     if not paths:
-        print(f"没有匹配到文件: {pattern}")
+        print(f"No files matched: {pattern}")
         return
 
-    print(f"找到 {len(paths)} 个 checkpoint\n")
+    print(f"Found {len(paths)} checkpoints\n")
 
     per_ckpt = {}  # fname -> {(layer,which): val}
     for p in paths:
@@ -64,7 +66,7 @@ def main():
         per_ckpt[os.path.basename(p)] = (dataset, seed, gammas)
 
     if not per_ckpt:
-        print("匹配到文件但没有解析出 dataset/seed, 检查命名规则")
+        print("Files matched but dataset/seed could not be parsed; check the naming convention")
         return
 
     n_layers = max(layer for _, _, g in per_ckpt.values() for (layer, _) in g.keys()) + 1
@@ -74,7 +76,7 @@ def main():
     for layer in range(n_layers):
         header_cols += [f"L{layer}_gamma_s", f"L{layer}_gamma_c"]
     col_w = 14
-    print("=== Per-checkpoint gamma 值 ===")
+    print("=== Per-checkpoint gamma values ===")
     print(f"{'checkpoint':<45}" + "".join(f"{c:>{col_w}}" for c in header_cols))
     for fname, (dataset, seed, gammas) in sorted(per_ckpt.items()):
         row = f"{fname:<45}"
@@ -90,7 +92,7 @@ def main():
         for (layer, which), val in gammas.items():
             agg[(dataset, layer, which)].append(val)
 
-    print("\n=== 按数据集/层 汇总 (signed mean ± std, 以及 |gamma| 均值, over seeds) ===")
+    print("\n=== Per-dataset / per-layer summary (signed mean ± std, plus mean |gamma|, over seeds) ===")
     datasets = sorted(set(d for d, _, _ in agg.keys()))
     for dataset in datasets:
         print(f"\n[{dataset}]")
@@ -105,9 +107,9 @@ def main():
                 abs_mean = sum(abs(v) for v in vals) / len(vals)
                 n_pos = sum(1 for v in vals if v > 0)
                 n_neg = len(vals) - n_pos
-                flag = " <-- signed mean 接近0 但 |gamma| 不小 -> 符号随 seed 翻转" \
+                flag = " <-- signed mean near 0 but |gamma| not small -> sign flips across seeds" \
                     if abs(mean) < 0.02 and abs_mean >= 0.02 else \
-                    (" <-- 真正接近0 (|gamma| 也小)" if abs_mean < 0.02 else "")
+                    (" <-- genuinely near 0 (|gamma| also small)" if abs_mean < 0.02 else "")
                 print(f"  layer {layer} gamma_{which}: mean={mean:+.6f} ± {std:.6f}  "
                       f"|gamma|_mean={abs_mean:.6f}  sign(+/-)={n_pos}/{n_neg}  (n={len(vals)}){flag}")
 
@@ -118,20 +120,25 @@ def main():
         all_abs_means.append(sum(abs(v) for v in vals) / len(vals))
     overall_abs_of_mean = sum(abs(m) for m in all_means) / len(all_means)
     overall_mean_of_abs = sum(all_abs_means) / len(all_abs_means)
-    print(f"\n=== 总体结论 ===")
-    print(f"|signed mean| 的均值(跨 layer x gamma_{{s,c}} x dataset): {overall_abs_of_mean:.6f}")
-    print(f"mean(|gamma|) 的均值(同上,不消号): {overall_mean_of_abs:.6f}")
+    print(f"\n=== Overall verdict ===")
+    print(f"Mean |signed mean| (across layer x gamma_{{s,c}} x dataset): {overall_abs_of_mean:.6f}")
+    print(f"Mean of mean(|gamma|) (same grouping, signs not cancelled): {overall_mean_of_abs:.6f}")
     if overall_mean_of_abs < 0.02:
-        print("-> gamma 的绝对值也普遍很小, 说明网络确实倾向于关闭/抑制 CMA cross-attention 的贡献,"
-              " 这与 CMA 对 mIoU 提升有限的现象一致, 可作为负结果的直接证据。")
+        print("-> The absolute gamma values are also consistently small, indicating the network"
+              " does tend to shut down / suppress the CMA cross-attention contribution, consistent"
+              " with CMA's limited mIoU gain and serving as direct evidence of the negative result.")
     elif overall_abs_of_mean < 0.02 <= overall_mean_of_abs:
-        print("-> gamma 幅值本身不小(约 0.05~0.24), 并未被网络整体关闭; 但正负号在不同 seed 间"
-              " 大致对半分布、随机翻转, 导致跨 seed 平均后互相抵消。这说明 CMA 分支在每次训练"
-              " 中确实学到了非平凡的调制, 但其方向(增强还是抑制该 token)对随机初始化/seed 敏感、"
-              " 不收敛到稳定的方向 —— 这正好可以解释为什么 CMA 带来的 mIoU 提升幅度小且不稳定"
-              "(Indian +0.70, Pavia +0.05, std 达 ±6): 不是模块被关闭, 而是它学到的融合方向不一致。")
+        print("-> gamma magnitudes are themselves not small (~0.05~0.24) and are not globally shut"
+              " off; but the signs are roughly split half-and-half across seeds and flip randomly,"
+              " so they cancel out when averaged over seeds. This means the CMA branch does learn a"
+              " non-trivial modulation at each run, but its direction (enhancing vs. suppressing a"
+              " given token) is sensitive to random initialisation / seed and does not converge to a"
+              " stable direction — which explains why CMA's mIoU gain is small and unstable"
+              " (Indian +0.70, Pavia +0.05, std up to ±6): it is not that the module is turned off,"
+              " but that the fusion direction it learns is inconsistent.")
     else:
-        print("-> gamma 值未普遍趋近 0, CMA 分支有稳定且一致方向的贡献, 提升有限的原因可能不在门控本身。")
+        print("-> gamma values do not generally approach 0; the CMA branch contributes in a stable,"
+              " consistent direction, so the limited gain is unlikely to be caused by the gating itself.")
 
 
 if __name__ == "__main__":

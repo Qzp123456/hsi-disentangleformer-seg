@@ -11,7 +11,7 @@ module load miniforge/24.7.1
 conda activate hsi
 cd ~/hsi_project
 
-# 语义分割: baseline vs CMA, 多seed
+# Semantic segmentation: baseline vs CMA, multiple seeds
 for seed in 42 123 2024; do
     python seg_train.py --dataset indian_pines --epochs 100 --seed $seed
     python seg_train.py --dataset indian_pines --epochs 100 --seed $seed --use_cma

@@ -11,7 +11,7 @@ module load miniforge/24.7.1
 conda activate hsi
 cd ~/hsi_project
 
-# 低训练比例下测试 CMA：0.1 / 0.2 / 0.3，各 8 个 seed
+# Test CMA at low training ratios: 0.1 / 0.2 / 0.3, 8 seeds each
 for ratio in 0.1 0.2 0.3; do
   for seed in 1 7 13 21 42 55 99 123; do
     for ds in indian_pines pavia; do
